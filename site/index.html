@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Data Portal</title>
+<!-- Pre-publication: no indexable description, and every crawler directive we
+     can express. Restore the descriptive title/description at publication. -->
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
+<meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet">
+<meta name="referrer" content="no-referrer">
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+  :root {
+    --c1:#440154; --c2:#31688E; --c3:#35B779; --c4:#FDE725;
+    --ink:#1a1a2e; --muted:#667; --bg:#fafafc; --card:#fff; --accent:#440154;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:var(--ink); background:var(--bg); }
+  header { background:linear-gradient(135deg,#440154 0%,#31688E 55%,#35B779 100%);
+           color:#fff; padding:26px 32px 18px; }
+  header h1 { margin:0 0 4px; font-size:26px; font-weight:700; letter-spacing:.2px; }
+  header p { margin:0; opacity:.92; font-size:14px; max-width:900px; }
+  nav { display:flex; gap:4px; background:var(--card); padding:0 24px; border-bottom:1px solid #e3e3ea;
+        position:sticky; top:0; z-index:10; }
+  nav button { border:none; background:none; padding:14px 16px; font-size:14.5px; cursor:pointer;
+               color:var(--muted); border-bottom:2.5px solid transparent; font-weight:600; }
+  nav button.active { color:var(--accent); border-bottom-color:var(--accent); }
+  main { max-width:1240px; margin:0 auto; padding:22px 24px 60px; }
+  .card { background:var(--card); border:1px solid #e8e8ef; border-radius:10px; padding:18px 20px; margin-bottom:18px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { display:flex; flex-direction:column; gap:4px; }
+  label { font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+  select, input[type=text] { padding:8px 10px; border:1.5px solid #d5d5df; border-radius:7px; font-size:14px;
+                             min-width:190px; background:#fff; }
+  input[type=text]:focus, select:focus { outline:none; border-color:var(--c2); }
+  textarea { padding:9px 11px; border:1.5px solid #d5d5df; border-radius:7px; font-size:13px;
+             font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1.55;
+             background:#fff; width:100%; min-height:130px; resize:vertical; color:var(--ink); }
+  textarea:focus { outline:none; border-color:var(--c2); }
+  .block { display:flex; flex-direction:column; gap:4px; max-width:620px; margin-bottom:12px; }
+  .hint { font-size:12px; color:var(--muted); font-weight:500; text-transform:none; letter-spacing:0; }
+  .pill { display:inline-block; background:#f4f3f8; border:1px solid #e2e0ea; border-radius:20px;
+          padding:3px 10px; font-size:12px; color:var(--muted); margin:2px 4px 2px 0; }
+  .subtype-chips { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 2px; }
+  .chip { display:flex; align-items:flex-start; gap:8px; background:var(--card); border:1px solid #e8e8ef;
+          border-radius:8px; padding:9px 12px; flex:1; min-width:210px; }
+  .chip .swatch { width:14px; height:14px; border-radius:4px; margin-top:2px; border:1px solid rgba(0,0,0,.25); flex-shrink:0; }
+  .chip b { font-size:13px; } .chip small { color:var(--muted); font-size:12px; line-height:1.35; display:block; }
+  .metrics { display:flex; gap:14px; flex-wrap:wrap; margin:12px 0; }
+  .metric { background:#f4f3f8; border-radius:8px; padding:10px 16px; min-width:130px; }
+  .metric .v { font-size:20px; font-weight:700; } .metric .k { font-size:11.5px; color:var(--muted); font-weight:600; }
+  .plot { width:100%; min-height:420px; }
+  .plot-km { max-width:640px; margin:0 auto; }   /* KM curves read better narrow */
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:900px){ .grid2 { grid-template-columns:1fr; } }
+  .note { font-size:12.5px; color:var(--muted); line-height:1.45; margin-top:8px; }
+  .status { font-size:13px; color:var(--muted); padding:6px 0; }
+  .err { color:#b2182b; font-weight:600; }
+  .autocomplete { position:relative; }
+  .ac-list { position:absolute; top:100%; left:0; right:0; background:#fff; border:1px solid #d5d5df;
+             border-radius:0 0 7px 7px; max-height:240px; overflow-y:auto; z-index:20; display:none; }
+  .ac-list div { padding:7px 11px; cursor:pointer; font-size:14px; }
+  .ac-list div:hover, .ac-list div.sel { background:#efeaf5; }
+  .cite { background:#f4f3f8; border-left:4px solid var(--accent); padding:10px 14px; font-size:13px;
+          border-radius:0 8px 8px 0; margin-top:14px; }
+  footer { text-align:center; color:var(--muted); font-size:12.5px; padding:22px; }
+  a { color:var(--c2); }
+  .dl { font-size:13px; font-weight:600; color:var(--c2); cursor:pointer; background:none; border:1px solid var(--c2);
+        border-radius:6px; padding:6px 12px; margin-top:8px; }
+</style>
+</head>
+<body>
+<!-- Pre-publication: the descriptive heading is injected by app.js after the
+     gate is passed, so it is not present in the served HTML for a crawler
+     that ignores robots directives. Inline it again at publication. -->
+<header id="hdr"></header>
+<nav id="nav"></nav>
+<main>
+  <div class="subtype-chips" id="chips"></div>
+  <div id="status" class="status">Initializing DuckDB-WASM…</div>
+  <div id="pages"></div>
+  <!-- Citation text is injected post-unlock (see fillHeader in app.js) so the
+       served HTML does not name the manuscript. Inline it at publication. -->
+  <div class="cite" id="citebox" style="display:none">
+    <b>Cite:</b> <span id="citation"></span>
+  </div>
+</main>
+<footer>Runs entirely client-side: DuckDB-WASM range-reads Parquet — no server, no tracking.</footer>
+<!-- bump ?v= when editing stats.js / app.js so browsers refetch instead of
+     serving a cached ES module -->
+<!-- gate.js must load first: it hides the page and blocks app boot until the
+     passphrase is entered. -->
+<script src="gate.js?v=1"></script>
+<script src="stats.js?v=2"></script>
+<script type="module" src="app.js?v=2"></script>
+</body>
+</html>

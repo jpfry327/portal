@@ -1,0 +1,22 @@
+# Raw source data (huge TSVs) — never committed.
+data/*
+
+# The combined methylation matrix is ~460 MB, over GitHub's hard 100 MB
+# per-file limit. It is the ETL input; the per-chromosome splits
+# (portal/data/meth_chr*.parquet, each <50 MB) are what the portal serves
+# and what gets committed. Regenerate with portal/split_methylation.py.
+portal/data/meth_discovery.parquet
+
+# Local DuckDB catalog — rebuilt by etl.py, not needed by the static site.
+portal/data/chordoma.duckdb
+
+# The filename map belongs to the published build only. If it lands in site/,
+# local dev requests tokenized names that do not exist on disk (404s, and
+# DuckDB-WASM reports them as an opaque WebAssembly error). The deploy
+# workflow generates it into the build directory instead.
+site/datamap.json
+datamap.json
+
+.DS_Store
+__pycache__/
+*.pyc

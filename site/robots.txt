@@ -1,0 +1,4 @@
+# Pre-publication: manuscript under review. Exclude everything.
+# Remove this file (or narrow it) at publication.
+User-agent: *
+Disallow: /

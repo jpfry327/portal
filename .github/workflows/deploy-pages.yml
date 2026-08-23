@@ -1,0 +1,141 @@
+name: Deploy portal to GitHub Pages
+
+# Push to main -> site rebuilds and redeploys. Data lives in the repo
+# (portal/data/*.parquet), so updating data is just a commit + push.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'portal/data/**'
+      - '.github/workflows/deploy-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          # -L dereferences the site/data symlink; GitHub Pages does not
+          # follow symlinks, so data must be materialized as real files.
+          cp -rL site/. _site/
+          rm -rf _site/data
+          mkdir -p _site/data
+          cp portal/data/*.parquet _site/data/
+          # The combined methylation matrix is intentionally absent (>100 MB,
+          # gitignored); the portal reads the per-chromosome splits instead.
+          rm -f _site/data/meth_discovery.parquet
+          rm -f _site/serve.py
+
+      - name: Rename data files to opaque tokens
+        run: |
+          set -euo pipefail
+          # Pre-publication obscurity: published filenames must not describe
+          # their contents. The map is generated INTO the build (never into
+          # site/, which would break local dev — the files there keep their
+          # readable names).
+          python3 portal/obfuscate_names.py _site/datamap.json
+          python3 - <<'PY'
+          import json, pathlib, sys
+          data = pathlib.Path("_site/data")
+          m = json.loads(pathlib.Path("_site/datamap.json").read_text())
+          missing = [n for n in m if not (data / f"{n}.parquet").exists()]
+          if missing:
+              sys.exit(f"::error::datamap references missing files: {missing}")
+          for logical, token in m.items():
+              (data / f"{logical}.parquet").rename(data / f"{token}.parquet")
+          leftover = [p.name for p in data.glob("*.parquet")
+                      if p.stem not in set(m.values())]
+          if leftover:
+              sys.exit(f"::error::unmapped data files would leak names: {leftover}")
+          print(f"renamed {len(m)} data files")
+          PY
+
+      - name: Verify no file exceeds GitHub limits
+        run: |
+          set -euo pipefail
+          big=$(find _site -type f -size +100M | head)
+          if [ -n "$big" ]; then
+            echo "::error::Files over 100 MB would break the push:"; echo "$big"; exit 1
+          fi
+          echo "Total site size: $(du -sh _site | cut -f1)"
+
+      - name: Verify required data files are present
+        run: |
+          set -euo pipefail
+          # Files are tokenized by now, so resolve each logical name through
+          # datamap.json before checking.
+          python3 - <<'PY'
+          import json, pathlib, sys
+          m = json.loads(pathlib.Path("_site/datamap.json").read_text())
+          data = pathlib.Path("_site/data")
+          required = ["samples", "gene_index", "meth_probe_index",
+                      "clinical_discovery", "clinical_zhang"]
+          required += [f"meth_chr{i}" for i in range(1, 23)]
+          bad = []
+          for name in required:
+              tok = m.get(name)
+              if tok is None:
+                  bad.append(f"{name} (absent from datamap)")
+              elif not (data / f"{tok}.parquet").exists():
+                  bad.append(f"{name} -> {tok}.parquet (file missing)")
+          if bad:
+              sys.exit("::error::" + "; ".join(bad))
+          print(f"verified {len(required)} required data files")
+          PY
+
+      - name: Verify no identifying strings leak into served HTML
+        run: |
+          set -euo pipefail
+          # The gate and the noindex directives only help if the served HTML
+          # itself is uninformative. Fail the deploy if it is not.
+          # Check text a crawler would render: strip <style>/<script> blocks
+          # and tags, then look for identifying terms. CSS class names like
+          # ".subtype-chips" are not rendered text and are ignored.
+          python3 - <<'PY'
+          import pathlib, re, sys
+          html = pathlib.Path("_site/index.html").read_text()
+          html = re.sub(r"(?is)<(style|script).*?</\1>", " ", html)
+          html = re.sub(r"(?s)<!--.*?-->", " ", html)
+          text = re.sub(r"(?s)<[^>]+>", " ", html)
+          hits = sorted({m.group(0).lower() for m in
+                         re.finditer(r"(?i)chordoma|multi-omic|proteom|methylat", text)})
+          if hits:
+              sys.exit(f"::error::identifying text rendered in index.html: {hits}")
+          print("index.html rendered text carries no identifying terms")
+          PY
+          for f in _site/data/*.parquet; do
+            case "$(basename "$f")" in
+              d*) ;;
+              *) echo "::error::untokenized data file: $f"; exit 1;;
+            esac
+          done
+          echo "no identifying strings in served HTML; all data files tokenized"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
