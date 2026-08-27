@@ -15,8 +15,8 @@
  * gate strong, since the check runs client-side either way.
  */
 (function () {
-  // sha256("chordoma")
-  const EXPECT = "8881231063d0889f60a113f27292025a8e6c9b2ad2752ccc1084e426c8d8b3a7";
+  // sha256("asvlab")
+  const EXPECT = "28e25d55a390bb7efaad150307f060367f08ef6057f99b77a0db6aca4ed0fc08";
   const KEY = "chordoma-atlas-unlocked";
 
   async function sha256(s) {
