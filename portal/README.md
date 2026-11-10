@@ -75,6 +75,12 @@ the HRA run-title metadata, so RNA, protein, and subtype join on one ID.
   **reported** statistics are from Cox PH regression on continuous expression —
   likelihood-ratio p and HR per 1 SD (comparable across genes). The cutpoint
   log-rank p is biased by cutpoint selection and is shown only with a warning.
+- Static site (`site/`) only: the KM grouping can be switched from the optimal
+  cutpoint to a fixed **bottom X% vs top X%** split (slider, 10–50%; 50% is a
+  median split; samples in between are not drawn), which reports a log-rank p
+  and a high-vs-low HR. A checkbox prints the full Cox output in the layout of
+  R's `summary(coxph)` (coef, HR, SE, z, Wald/LR/score tests, concordance) for
+  the continuous model and for the dichotomised high-vs-low model.
 
 ## Style
 

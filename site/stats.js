@@ -2,8 +2,9 @@
  *
  * Implements: Pearson/Spearman correlation (t-approx p), Kruskal-Wallis
  * (tie-corrected, chi2 p), Kaplan-Meier curves, two-group log-rank test,
- * single-covariate Cox PH with Efron tie handling (matches lifelines),
- * and maximally-selected-log-rank optimal cutpoint.
+ * single-covariate Cox PH with Efron tie handling (matches lifelines / R
+ * coxph; LR, Wald and score tests, Harrell's C), maximally-selected-log-rank
+ * optimal cutpoint, and a fixed bottom-X% / top-X% percentile split.
  *
  * No dependencies. Attaches `ChordStats` to globalThis (browser + jsc).
  */
@@ -225,12 +226,34 @@
     return { stat, p: chi2Sf(stat, 1) };
   }
 
-  // Cox PH, single covariate, Efron ties (matches lifelines default).
-  function coxEfron(time, event, x) {
-    // z-score covariate -> HR per 1 SD
+  // Harrell's C for a single risk score (higher score = higher hazard), as
+  // reported by R summary(coxph): a pair is comparable when the shorter time
+  // is an event (an event and a censoring at the same time are comparable,
+  // two events at the same time are not); ties in the score count 1/2.
+  function concordance(time, event, score) {
+    let conc = 0, disc = 0, tied = 0;
+    const n = time.length;
+    for (let i = 0; i < n; i++) {
+      if (!event[i]) continue;
+      for (let j = 0; j < n; j++) {
+        if (j === i) continue;
+        if (!(time[j] > time[i] || (time[j] === time[i] && !event[j]))) continue;
+        if (score[i] > score[j]) conc++;
+        else if (score[i] < score[j]) disc++;
+        else tied++;
+      }
+    }
+    const tot = conc + disc + tied;
+    return { c: tot ? (conc + 0.5 * tied) / tot : NaN, concordant: conc, discordant: disc, tied };
+  }
+
+  // Cox PH, single covariate, Efron ties (matches lifelines / R coxph default).
+  // standardize=true (default) z-scores the covariate -> HR per 1 SD;
+  // standardize=false fits x as given (e.g. a 0/1 group indicator).
+  function coxEfron(time, event, x, { standardize = true } = {}) {
     const s = sd(x), m = mean(x);
-    if (s === 0) return null;
-    const z = x.map((v) => (v - m) / s);
+    if (!(s > 0)) return null;
+    const z = standardize ? x.map((v) => (v - m) / s) : x;
     const idx = time.map((t, i) => i).sort((a, b) => time[a] - time[b]);
 
     function llGradHess(b) {
@@ -274,21 +297,30 @@
 
     let b = 0, res = llGradHess(0);
     const ll0 = res.ll;
-    for (let it = 0; it < 50; it++) {
+    const score = res.hess < 0 ? res.grad ** 2 / -res.hess : 0; // score test at beta = 0
+    let converged = false, iter = 0;
+    for (iter = 1; iter <= 50; iter++) {
       const step = res.grad / -res.hess;
       if (!isFinite(step)) return null;
       b += step;
       res = llGradHess(b);
-      if (Math.abs(step) < 1e-10) break;
+      if (Math.abs(step) < 1e-10) { converged = true; break; }
     }
+    // monotone likelihood (e.g. one arm has no events): beta runs off to +-Inf
+    if (!converged || !(res.hess < 0) || Math.abs(b) > 20) return null;
     const se = 1 / Math.sqrt(-res.hess);
     const lr = 2 * (res.ll - ll0);
+    const zStat = b / se;
     return {
-      beta: b, hr: Math.exp(b), se,
+      beta: b, hr: Math.exp(b), se, z: zStat,
       hrLo: Math.exp(b - 1.959963984540054 * se),
       hrHi: Math.exp(b + 1.959963984540054 * se),
       lrStat: lr, lrP: chi2Sf(Math.max(lr, 0), 1),
-      waldP: 2 * normSf(Math.abs(b / se)),
+      waldStat: zStat ** 2, waldP: 2 * normSf(Math.abs(zStat)),
+      scoreStat: score, scoreP: chi2Sf(score, 1),
+      concordance: concordance(time, event, z.map((v) => b * v)).c,
+      ll0, ll: res.ll, iterations: iter,
+      standardized: standardize, xMean: m, xSd: s,
       n: time.length, events: event.reduce((a, v) => a + v, 0),
     };
   }
@@ -319,7 +351,31 @@
     return best;
   }
 
+  // R quantile() type 7 (the default): linear interpolation between order stats
+  function quantile(a, p) {
+    const s = [...a].sort((x, y) => x - y);
+    const h = (s.length - 1) * p, lo = Math.floor(h), hi = Math.ceil(h);
+    return s[lo] + (h - lo) * (s[hi] - s[lo]);
+  }
+
+  // Fixed percentile split: bottom pct% vs top pct% (pct in (0, 50]); samples
+  // in between are left out. pct = 50 is a median split (low <= median < high).
+  // Returns per-sample labels ("high" | "low" | null) and the two thresholds.
+  function percentileSplit(x, pct) {
+    const p = Math.min(Math.max(pct, 0), 50) / 100;
+    const lowMax = quantile(x, p), highMin = quantile(x, 1 - p);
+    const single = !(lowMax < highMin); // median split, or thresholds tied
+    const group = x.map((v) => (v <= lowMax ? "low"
+      : (single ? v > lowMax : v >= highMin) ? "high" : null));
+    return {
+      group, lowMax, highMin, single,
+      nLow: group.filter((g) => g === "low").length,
+      nHigh: group.filter((g) => g === "high").length,
+    };
+  }
+
   globalThis.ChordStats = {
+    quantile, percentileSplit, concordance,
     chi2Sf, tSf2, normSf, mean, median, sd, ranks,
     pearson, spearman, kruskal, kmCurve, logrank, coxEfron, optimalCutpoint,
   };

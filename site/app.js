@@ -507,9 +507,19 @@ async function pageSurvival(root) {
       <div><label>Stratify by</label><select id="sv-mode"></select></div>
       <div id="sv-genewrap" style="display:none">${geneInput("g-surv", "LYST")}</div>
     </div>
+    <div class="row" id="sv-cutrow" style="display:none; margin-top:12px">
+      <div><label for="sv-cutmode">KM groups</label><select id="sv-cutmode">
+        <option value="optimal">Optimal cutpoint</option>
+        <option value="pct">Bottom X% vs top X%</option></select></div>
+      <div id="sv-pctwrap" style="display:none">
+        <label for="sv-pct" id="sv-pctlabel"></label>
+        <input type="range" id="sv-pct" min="10" max="50" step="1" value="50"></div>
+      <label class="check"><input type="checkbox" id="sv-coxfull"> Show full Cox model output</label>
+    </div>
     <div class="metrics" id="sv-metrics"></div>
     <div class="plot plot-km" id="sv-plot"></div>
     <div class="note" id="sv-note"></div>
+    <pre class="coxout" id="sv-coxout" style="display:none"></pre>
     <button class="dl" id="sv-dl" style="display:none">Download CSV</button>
   </div>`));
 
@@ -517,7 +527,17 @@ async function pageSurvival(root) {
   const endSel = document.getElementById("sv-endpoint");
   const modeSel = document.getElementById("sv-mode");
   const geneWrap = document.getElementById("sv-genewrap");
+  const cutRow = document.getElementById("sv-cutrow");
+  const cutSel = document.getElementById("sv-cutmode");
+  const pctWrap = document.getElementById("sv-pctwrap");
+  const pctInp = document.getElementById("sv-pct");
+  const pctLabel = document.getElementById("sv-pctlabel");
+  const coxChk = document.getElementById("sv-coxfull");
+  const coxOut = document.getElementById("sv-coxout");
+  const MIN_PCT_ARM = 5; // fewest samples per arm drawn in percentile mode
   let gene = "LYST";
+  let cur = null;   // per-gene data of the last query; re-rendered without refetching
+  let runId = 0;    // drops results of a query that a newer one has overtaken
 
   function fillModes() {
     // Protein expression stratification only exists for the Zhang cohort.
@@ -531,6 +551,10 @@ async function pageSurvival(root) {
   function syncControls() {
     const perGene = modeSel.value === "Gene expression" || modeSel.value === "Protein expression";
     geneWrap.style.display = perGene ? "" : "none";
+    cutRow.style.display = perGene ? "" : "none";
+    pctWrap.style.display = cutSel.value === "pct" ? "" : "none";
+    const x = Number(pctInp.value);
+    pctLabel.textContent = x === 50 ? "Median split (bottom 50% vs top 50%)" : `Bottom ${x}% vs top ${x}%`;
   }
 
   function kmAxes(cohort, tcol) { // ggsurvplot-matched: 2-year ticks, fixed xlim
@@ -548,6 +572,8 @@ async function pageSurvival(root) {
   }
 
   async function run() {
+    const myRun = ++runId;
+    cur = null;
     const cohort = cohortSel.value;
     const [label, tcol, scol] = SURV[cohort][Number(endSel.value)];
     setStatus("Querying clinical data…");
@@ -561,6 +587,7 @@ async function pageSurvival(root) {
       .map((r) => ({ ...r, [tcol]: Number(r[tcol]), [scol]: Number(r[scol]),
         subtype: subtypeOf(cohort).get(r.sample_id) }))
       .filter((r) => r.subtype);
+    if (myRun !== runId) return;
     setStatus("");
     const primaryNote = primaryOnly
       ? " OS restricted to primary tumors (recurrent samples share the matched primary's death time)."
@@ -569,6 +596,7 @@ async function pageSurvival(root) {
     const note = document.getElementById("sv-note");
     const dl = document.getElementById("sv-dl");
     metrics.innerHTML = ""; note.textContent = ""; dl.style.display = "none";
+    coxOut.style.display = "none";
 
     if (modeSel.value === "Molecular subtype") {
       const groups = ORDER.filter((s) => clin.some((r) => r.subtype === s)).map((s) => {
@@ -592,6 +620,7 @@ async function pageSurvival(root) {
     const molLabel = molecule === "protein" ? "protein" : "RNA";
     setStatus(`Querying ${gene} ${molLabel}…`);
     const expr = await fetchGene(gene, molecule === "protein" ? "protein" : cohort);
+    if (myRun !== runId) return;
     setStatus("");
     if (!expr.length) { setStatus(`${gene}: not found in the Zhang ${molLabel} matrix.`, true); return; }
     const em = new Map(expr.map((d) => [d.sample, d.value]));
@@ -600,37 +629,167 @@ async function pageSurvival(root) {
     if (df.length < 20) { setStatus(`${gene}: <20 samples with ${molLabel} + follow-up.`, true); return; }
     const time = df.map((r) => r[tcol]), event = df.map((r) => r[scol]), x = df.map((r) => r.value);
     const cox = S.coxEfron(time, event, x);
-    const cut = S.optimalCutpoint(time, event, x);
-    if (!cox || !cut) { setStatus("Not enough events for a stable model.", true); return; }
+    if (!cox) { setStatus("Not enough events for a stable model.", true); return; }
+    cur = { df, time, event, x, cox, cohort, label, tcol, scol, gene, molecule, molLabel, primaryNote,
+      unit: molecule === "protein" ? "log abundance" : EXPR_UNITS[cohort] };
+    renderGene();
+  }
+
+  // ---- full Cox output, laid out like R's summary(coxph)
+  const sig = (v) => (!isFinite(v) ? String(v)
+    : v !== 0 && (Math.abs(v) < 1e-3 || Math.abs(v) >= 1e5) ? v.toExponential(3) : v.toPrecision(4));
+  const pR = (p) => (p < 1e-3 ? p.toExponential(2) : p.toPrecision(3));
+  function coxTable(rows) { // rows: [label, coef, se, z, p]
+    const head = ["", "coef", "exp(coef)", "se(coef)", "z", "Pr(>|z|)", "lower .95", "upper .95"];
+    const body = rows.map(([lab, b, se, z, p]) => [lab, sig(b), sig(Math.exp(b)), sig(se), z.toFixed(3), pR(p),
+      sig(Math.exp(b - 1.959963984540054 * se)), sig(Math.exp(b + 1.959963984540054 * se))]);
+    const w = head.map((h, i) => Math.max(h.length, ...body.map((r) => r[i].length)));
+    return [head, ...body].map((r) => r.map((c, i) => (i ? c.padStart(w[i]) : c.padEnd(w[i]))).join("  ")).join("\n");
+  }
+  const coxTests = (m) =>
+    `Concordance           = ${m.concordance.toFixed(3)}\n` +
+    `Likelihood ratio test = ${sig(m.lrStat)} on 1 df, p = ${pR(m.lrP)}\n` +
+    `Wald test             = ${sig(m.waldStat)} on 1 df, p = ${pR(m.waldP)}\n` +
+    `Score (logrank) test  = ${sig(m.scoreStat)} on 1 df, p = ${pR(m.scoreP)}`;
+
+  function coxReport(km) { // km: { desc, nUsed, events, model, caveat }
+    const { cox, gene, molLabel, label, cohort, tcol, scol, unit } = cur;
+    const out = [
+      `Cox proportional hazards model: continuous ${gene} ${molLabel}`,
+      `Surv(${tcol}, ${scol}) ~ ${gene}    [${label}, ${COHORTS[cohort]}; Efron ties]`,
+      `n = ${cox.n}, number of events = ${cox.events}`,
+      "",
+      coxTable([
+        [`${gene}, per 1 SD`, cox.beta, cox.se, cox.z, cox.waldP],
+        [`${gene}, per 1 unit`, cox.beta / cox.xSd, cox.se / cox.xSd, cox.z, cox.waldP],
+      ]),
+      `(lower/upper .95 bound exp(coef), the hazard ratio; 1 unit = 1 ${unit}; ` +
+        `mean ${sig(cox.xMean)}, SD ${sig(cox.xSd)})`,
+      "",
+      coxTests(cox),
+      "",
+      "-".repeat(72),
+      `Cox proportional hazards model: ${gene} ${molLabel} high vs low (${km.desc})`,
+      `Surv(${tcol}, ${scol}) ~ group    [reference = low]`,
+    ];
+    if (km.model) {
+      const m = km.model;
+      out.push(`n = ${m.n}, number of events = ${m.events}`, "",
+        coxTable([["high vs low", m.beta, m.se, m.z, m.waldP]]), "", coxTests(m));
+    } else {
+      out.push(`n = ${km.nUsed}, number of events = ${km.events}`, "",
+        "Model not estimable (one group has no events, or the fit did not converge).");
+    }
+    if (km.caveat) out.push("", km.caveat);
+    return out.join("\n");
+  }
+
+  function renderGene() {
+    if (!cur) return;
+    const { df, time, event, x, cox, cohort, label, tcol, scol, gene, molecule, molLabel, primaryNote } = cur;
+    const metrics = document.getElementById("sv-metrics");
+    const note = document.getElementById("sv-note");
+    const dl = document.getElementById("sv-dl");
+    const plot = document.getElementById("sv-plot");
+    const fail = (msg) => {
+      Plotly.purge(plot); note.textContent = ""; dl.style.display = "none"; coxOut.style.display = "none";
+      setStatus(msg, true);
+    };
+    setStatus("");
     metrics.innerHTML = `
       <div class="metric"><div class="v">${cox.hr.toFixed(2)}</div><div class="k">Cox HR per SD</div></div>
       <div class="metric"><div class="v">${cox.hrLo.toFixed(2)}–${cox.hrHi.toFixed(2)}</div><div class="k">95% CI</div></div>
       <div class="metric"><div class="v">${pFmt(cox.lrP)}</div><div class="k">Likelihood-ratio p</div></div>
       <div class="metric"><div class="v">${cox.n} (${cox.events})</div><div class="k">n (events)</div></div>`;
-    const hiIdx = df.filter((r) => r.value > cut.cutpoint);
-    const loIdx = df.filter((r) => r.value <= cut.cutpoint);
-    const groups = [
-      { label: `${gene} ${molLabel} high`, color: "#B2182B", time: hiIdx.map((r) => r[tcol]), event: hiIdx.map((r) => r[scol]) },
-      { label: `${gene} ${molLabel} low`, color: "#2166AC", time: loIdx.map((r) => r[tcol]), event: loIdx.map((r) => r[scol]) },
-    ];
-    Plotly.newPlot(document.getElementById("sv-plot"), kmTraces(groups), {
+
+    // ---- assign KM groups: optimal cutpoint, or fixed bottom/top percentile
+    const pctMode = cutSel.value === "pct";
+    const pct = Number(pctInp.value);
+    let grp, cut = null, split = null, desc;
+    if (pctMode) {
+      split = S.percentileSplit(x, pct);
+      grp = split.group;
+      if (split.nHigh < MIN_PCT_ARM || split.nLow < MIN_PCT_ARM) {
+        fail(`Fewer than ${MIN_PCT_ARM} samples per group at ${pct}% ` +
+          `(high n=${split.nHigh}, low n=${split.nLow}); move the slider toward 50%.`);
+        return;
+      }
+      desc = pct === 50 ? `median split at ${split.lowMax.toFixed(2)}` : `bottom ${pct}% vs top ${pct}%`;
+    } else {
+      if (cur.cut === undefined) cur.cut = S.optimalCutpoint(time, event, x);
+      cut = cur.cut;
+      if (!cut) { fail("No cutpoint leaves ≥10 samples per group; try the percentile split."); return; }
+      grp = x.map((v) => (v > cut.cutpoint ? "high" : "low"));
+      desc = `optimal cutpoint ${cut.cutpoint.toFixed(2)}`;
+    }
+    const arm = (g) => {
+      const ix = grp.map((v, i) => (v === g ? i : -1)).filter((i) => i >= 0);
+      return { time: ix.map((i) => time[i]), event: ix.map((i) => event[i]) };
+    };
+    const hi = arm("high"), lo = arm("low");
+    const lr = S.logrank(hi.time, hi.event, lo.time, lo.event);
+    // dichotomised Cox on the plotted samples (0 = low, 1 = high)
+    const kmModel = S.coxEfron(hi.time.concat(lo.time), hi.event.concat(lo.event),
+      hi.time.map(() => 1).concat(lo.time.map(() => 0)), { standardize: false });
+    const nMid = df.length - hi.time.length - lo.time.length;
+    const hrTxt = kmModel
+      ? `${kmModel.hr.toFixed(2)} (95% CI ${kmModel.hrLo.toFixed(2)}–${kmModel.hrHi.toFixed(2)})` : "not estimable";
+
+    if (pctMode) {
+      metrics.innerHTML += `
+        <div class="metric"><div class="v">${pFmt(lr.p)}</div><div class="k">Log-rank p, high vs low</div></div>
+        <div class="metric"><div class="v">${kmModel ? kmModel.hr.toFixed(2) : "–"}</div><div class="k">HR high vs low${
+          kmModel ? ` (${kmModel.hrLo.toFixed(2)}–${kmModel.hrHi.toFixed(2)})` : ""}</div></div>`;
+    }
+    Plotly.react(plot, kmTraces([
+      { label: `${gene} ${molLabel} high`, color: "#B2182B", ...hi },
+      { label: `${gene} ${molLabel} low`, color: "#2166AC", ...lo },
+    ]), {
       ...BASELAYOUT, ...kmAxes(cohort, tcol),
-      title: { text: `${gene} ${molLabel} — ${label}, ${COHORTS[cohort]} (optimal cutpoint ${cut.cutpoint.toFixed(2)})`, font: { size: 15 } },
+      title: { text: `${gene} ${molLabel} — ${label}, ${COHORTS[cohort]} (${desc})`, font: { size: 15 } },
       legend: { x: 0.99, xanchor: "right", y: 0.99, yanchor: "top" },
     }, PLOTCFG);
-    note.textContent =
-      `KM at the optimal cutpoint (max-selected log-rank, 10th–90th pct scan, ≥10/arm) is for display; ` +
-      `report the Cox statistics on continuous ${molLabel} (LR p = ${pFmt(cox.lrP)}, ` +
-      `HR/SD = ${cox.hr.toFixed(2)}). Cutpoint log-rank p (${pFmt(cut.logrankP)}) is ` +
-      `optimistically biased by cutpoint selection. Censored observations marked with +.` + primaryNote;
+
+    const coxTxt = `report the Cox statistics on continuous ${molLabel} (LR p = ${pFmt(cox.lrP)}, ` +
+      `HR/SD = ${cox.hr.toFixed(2)})`;
+    let caveat;
+    if (pctMode) {
+      const groupsTxt = split.single
+        ? `samples above (high, n=${split.nHigh}) vs at or below (low, n=${split.nLow}) ` +
+          `${pct === 50 ? "the median" : "the tied threshold"} ${split.lowMax.toFixed(2)}`
+        : `the top ${pct}% (≥ ${split.highMin.toFixed(2)}, n=${split.nHigh}) vs the bottom ${pct}% ` +
+          `(≤ ${split.lowMax.toFixed(2)}, n=${split.nLow}); the middle ${nMid} samples are not drawn`;
+      note.textContent = `KM compares ${groupsTxt}. Log-rank ${pFmtEq(lr.p)}; HR high vs low = ${hrTxt}. ` +
+        `A percentile fixed in advance is not outcome-selected, but picking the slider position that ` +
+        `looks best reintroduces that bias; ${coxTxt}, which uses all ${cox.n} samples. ` +
+        `Censored observations marked with +.` + primaryNote;
+      caveat = "Unbiased only if the percentile was chosen before looking at the outcome.";
+    } else {
+      note.textContent =
+        `KM at the optimal cutpoint (max-selected log-rank, 10th–90th pct scan, ≥10/arm) is for display; ` +
+        `${coxTxt}. Cutpoint log-rank p (${pFmt(cut.logrankP)}) is ` +
+        `optimistically biased by cutpoint selection. Censored observations marked with +.` + primaryNote;
+      caveat = "CAUTION: the cutpoint was chosen to maximise the log-rank statistic, so this HR and\n" +
+        "its p-values are optimistically biased. Shown for completeness; do not report.";
+    }
+    coxOut.style.display = coxChk.checked ? "block" : "none";
+    if (coxChk.checked) {
+      coxOut.textContent = coxReport({ desc, model: kmModel, caveat,
+        nUsed: hi.time.length + lo.time.length,
+        events: hi.event.concat(lo.event).reduce((a, v) => a + v, 0) });
+    }
     dl.style.display = "inline-block";
-    dl.onclick = () => downloadCSV(df.map((r) => ({ sample_id: r.sample_id, subtype: r.subtype,
-      [tcol]: r[tcol], [scol]: r[scol], [molecule]: r.value })), `${gene}_${molLabel}_${cohort}_survival.csv`);
+    dl.onclick = () => downloadCSV(df.map((r, i) => ({ sample_id: r.sample_id, subtype: r.subtype,
+      [tcol]: r[tcol], [scol]: r[scol], [molecule]: r.value, km_group: grp[i] ?? "not_plotted" })),
+      `${gene}_${molLabel}_${cohort}_survival.csv`);
   }
 
   cohortSel.onchange = () => { fillEndpoints(); fillModes(); syncControls(); run(); };
   endSel.onchange = run;
   modeSel.onchange = () => { syncControls(); run(); };
+  cutSel.onchange = () => { syncControls(); renderGene(); };
+  pctInp.oninput = () => { syncControls(); renderGene(); };
+  coxChk.onchange = renderGene;
   await attachAutocomplete("g-surv", (g) => { gene = g; run(); });
   fillEndpoints();
   fillModes();
